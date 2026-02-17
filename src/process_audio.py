@@ -39,19 +39,29 @@ def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
 
     # ── Download ──────────────────────────────────────────────────────
     log.info(f"  Downloading audio for video_id={video_id}...")
+    # Write cookies to temp file if available
+    cookies_file = None
+    yt_cookies = os.environ.get("YT_COOKIES", "")
+    if yt_cookies:
+        cookies_file = temp / "cookies.txt"
+        cookies_file.write_text(yt_cookies)
+
     cmd = [
         "yt-dlp",
         f"https://www.youtube.com/watch?v={video_id}",
-        "-x",                             # extract audio only
+        "-x",
         "--audio-format", "mp3",
-        "--audio-quality", "0",           # best quality
+        "--audio-quality", "0",
         "-o", str(raw),
         "--no-playlist",
         "--quiet",
         "--no-warnings",
         "--geo-bypass",
-        "--add-header", "User-Agent:Mozilla/5.0",
+        "--extractor-args", "youtube:player_client=web",
+        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     ]
+    if cookies_file and cookies_file.exists():
+        cmd += ["--cookies", str(cookies_file)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp failed: {result.stderr}")
