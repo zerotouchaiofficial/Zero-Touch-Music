@@ -1,6 +1,7 @@
 """
-process_audio.py - Downloads video with yt-dlp, extracts audio with ffmpeg.
-This is more reliable than yt-dlp's built-in audio extraction (-x).
+process_audio.py
+Gets audio from SoundCloud (no bot detection, no cookies needed).
+Falls back to searching multiple sources.
 """
 
 import os
@@ -20,111 +21,114 @@ SLOW_FACTOR  = 0.80
 REVERB_ROOM  = 0.75
 REVERB_WET   = 0.35
 TARGET_LUFS  = -14.0
-COOKIES_PATH = Path("/tmp/yt_cookies.txt")
 
 
 class DownloadError(Exception):
     pass
 
 
-def _write_cookies():
-    """Write cookies from env var using Python (safe for multiline content)."""
-    yt_cookies = os.environ.get("YT_COOKIES", "").strip()
-    if not yt_cookies:
-        log.warning("  YT_COOKIES env var is empty")
-        return False
-    COOKIES_PATH.write_text(yt_cookies, encoding="utf-8")
-    size = COOKIES_PATH.stat().st_size
-    log.info(f"  Cookies written: {size} bytes")
-    return size > 200
+def _search_soundcloud(song_title: str, artist: str) -> str | None:
+    """Search SoundCloud and return the URL of the best match."""
+    query = f"{artist} {song_title}".replace(" ", "+")
+    search_url = f"ytsearch1:{artist} {song_title} official audio"
 
+    # Try SoundCloud search
+    sc_search = f"scsearch1:{artist} {song_title}"
 
-def _try_download(url: str, out_video: Path, cookies_arg: list) -> bool:
-    """
-    Download the VIDEO file (not audio-only).
-    Avoids all -x / --audio-format / -f conflicts entirely.
-    ffmpeg extracts audio afterward.
-    """
-    clients = ["ios", "web", "android", "tv_embedded", "mweb"]
-
-    for client in clients:
-        log.info(f"  Trying client={client}...")
-        cmd = [
+    for search in [sc_search, search_url]:
+        result = subprocess.run([
             "yt-dlp",
-            url,
-            # Download best video+audio merged, or best single file
-            "-f", "best[ext=mp4]/best",
-            "-o", str(out_video),
             "--no-playlist",
             "--quiet",
             "--no-warnings",
-            "--geo-bypass",
-            "--merge-output-format", "mp4",
-            "--extractor-args", f"youtube:player_client={client}",
-            "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        ] + cookies_arg
+            "--print", "webpage_url",
+            search,
+        ], capture_output=True, text=True)
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0 and out_video.exists() and out_video.stat().st_size > 10000:
-            log.info(f"  ✓ Download succeeded with client={client}")
+        if result.returncode == 0 and result.stdout.strip():
+            url = result.stdout.strip()
+            log.info(f"  Found URL: {url[:60]}...")
+            return url
+
+    return None
+
+
+def _download_from_url(url: str, out_path: Path) -> bool:
+    """Download audio from a given URL."""
+    cmd = [
+        "yt-dlp",
+        url,
+        "--no-playlist",
+        "--quiet",
+        "--no-warnings",
+        "-x",
+        "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "-o", str(out_path),
+        "--geo-bypass",
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode == 0:
+        # Find the actual output file
+        files = list(out_path.parent.glob(f"{out_path.stem}*"))
+        if files and any(f.stat().st_size > 10000 for f in files):
+            log.info(f"  ✓ Downloaded successfully")
             return True
 
-        # Clean up partial file
-        if out_video.exists():
-            out_video.unlink()
-
-        err = result.stderr[:120].strip()
-        log.warning(f"  client={client} failed: {err}")
-
+    log.warning(f"  Download failed: {result.stderr[:100].strip()}")
     return False
 
 
 def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
-    temp      = Path(temp_dir)
-    video_out = temp / f"{video_id}.mp4"
-    mp3_raw   = temp / f"{video_id}_raw.mp3"
-    out       = temp / f"{video_id}_slowed_reverb.mp3"
+    temp    = Path(temp_dir)
+    raw_out = temp / f"{video_id}_raw"   # no extension, yt-dlp adds it
+    out     = temp / f"{video_id}_slowed_reverb.mp3"
 
-    # Write cookies fresh for each attempt
-    has_cookies = _write_cookies()
-    cookies_arg = ["--cookies", str(COOKIES_PATH)] if has_cookies else []
+    # ── Step 1: Find audio source (SoundCloud preferred) ──────────────
+    log.info(f"  Searching SoundCloud for: {artist} - {title}")
+    url = _search_soundcloud(title, artist)
 
-    # Download video
-    log.info(f"  Downloading video_id={video_id}...")
-    success = _try_download(
-        f"https://www.youtube.com/watch?v={video_id}",
-        video_out,
-        cookies_arg,
-    )
+    if not url:
+        raise DownloadError(f"Could not find '{title}' by {artist} on any source")
+
+    # ── Step 2: Download ──────────────────────────────────────────────
+    log.info(f"  Downloading audio...")
+    success = _download_from_url(url, raw_out)
 
     if not success:
-        raise DownloadError(f"All clients failed for {video_id}")
+        raise DownloadError(f"Download failed for '{title}'")
 
-    log.info(f"  Video downloaded: {video_out.stat().st_size / (1024*1024):.1f} MB")
+    # Find the downloaded file
+    downloaded = [
+        f for f in temp.glob(f"{video_id}_raw*")
+        if not f.name.endswith(".part") and f.stat().st_size > 10000
+    ]
+    if not downloaded:
+        raise DownloadError(f"No downloaded file found in {temp}")
 
-    # Extract audio with ffmpeg (very reliable, no yt-dlp format issues)
-    log.info("  Extracting audio with ffmpeg...")
-    result = subprocess.run([
-        "ffmpeg", "-i", str(video_out),
-        "-vn",                    # no video
-        "-acodec", "libmp3lame",
-        "-ar", "44100",
-        "-ac", "2",
-        "-b:a", "320k",
-        str(mp3_raw),
-        "-y", "-loglevel", "error"
-    ], capture_output=True, text=True)
+    raw_file = downloaded[0]
 
-    if result.returncode != 0:
-        raise DownloadError(f"ffmpeg audio extraction failed: {result.stderr}")
+    # Convert to mp3 if needed
+    mp3_file = temp / f"{video_id}_raw.mp3"
+    if raw_file.suffix.lower() != ".mp3":
+        log.info(f"  Converting {raw_file.suffix} → mp3...")
+        subprocess.run([
+            "ffmpeg", "-i", str(raw_file),
+            "-vn", "-ar", "44100", "-ac", "2", "-b:a", "320k",
+            str(mp3_file), "-y", "-loglevel", "quiet"
+        ], check=True)
+        if raw_file != mp3_file:
+            raw_file.unlink()
+    else:
+        mp3_file = raw_file
 
-    # Clean up video file to save space
-    video_out.unlink()
-    log.info(f"  MP3 extracted: {mp3_raw.stat().st_size / 1024:.0f} KB")
+    log.info(f"  Audio ready: {mp3_file.stat().st_size / 1024:.0f} KB")
 
-    # Slow down
+    # ── Step 3: Slow down ──────────────────────────────────────────────
     log.info("  Applying slowed effect (0.80x)...")
-    y, sr = librosa.load(str(mp3_raw), sr=44100, mono=False)
+    y, sr = librosa.load(str(mp3_file), sr=44100, mono=False)
 
     if y.ndim == 1:
         y_slow = librosa.effects.time_stretch(y, rate=SLOW_FACTOR)
@@ -134,7 +138,7 @@ def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
         right = librosa.effects.time_stretch(y[1], rate=SLOW_FACTOR)
         y_slow = np.stack([left, right])
 
-    # Effects chain
+    # ── Step 4: Effects chain ──────────────────────────────────────────
     log.info("  Applying reverb, EQ, compression...")
     board = Pedalboard([
         Compressor(threshold_db=-18, ratio=3.0, attack_ms=5.0, release_ms=100.0),
@@ -153,7 +157,8 @@ def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
     wav_path = temp / f"{video_id}_processed.wav"
     sf.write(str(wav_path), y_effected.T, sr, subtype="PCM_24")
 
-    log.info("  Adding fade-in/out...")
+    # ── Step 5: Fade and export ────────────────────────────────────────
+    log.info("  Adding fade-in/out and exporting...")
     seg = AudioSegment.from_wav(str(wav_path))
     seg = seg.fade_in(3000).fade_out(4000)
     seg.export(str(out), format="mp3", bitrate="320k",
