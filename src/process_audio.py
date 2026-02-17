@@ -1,6 +1,5 @@
 """
-process_audio.py
-Downloads audio with yt-dlp then applies slowed + reverb effects.
+process_audio.py - Downloads + applies slowed+reverb. Raises DownloadError on failure.
 """
 
 import os
@@ -23,18 +22,23 @@ TARGET_LUFS  = -14.0
 COOKIES_PATH = Path("/tmp/yt_cookies.txt")
 
 
-def _try_download(url: str, raw: Path, cookies_arg: list) -> subprocess.CompletedProcess:
-    """Try downloading with multiple format/client combos until one works."""
+class DownloadError(Exception):
+    """Raised when yt-dlp cannot download a video — signals main to try next song."""
+    pass
+
+
+def _try_download(url: str, raw: Path, cookies_arg: list) -> bool:
+    """Try multiple format/client combos. Returns True if successful."""
     attempts = [
-        # (player_client, format_selector)
         ("ios",         "bestaudio"),
         ("web",         "bestaudio"),
         ("android",     "bestaudio"),
-        ("ios",         "worstaudio/bestaudio"),   # some videos only have one format
+        ("ios",         "worstaudio/bestaudio"),
         ("tv_embedded", "bestaudio/best"),
         ("mweb",        "bestaudio/best"),
-        ("ios",         None),                      # let yt-dlp decide format
+        ("ios",         None),
         ("web",         None),
+        ("android",     None),
     ]
 
     for client, fmt in attempts:
@@ -42,8 +46,7 @@ def _try_download(url: str, raw: Path, cookies_arg: list) -> subprocess.Complete
         log.info(f"  Trying {label}...")
 
         cmd = [
-            "yt-dlp",
-            url,
+            "yt-dlp", url,
             "-x",
             "--audio-format", "mp3",
             "--audio-quality", "0",
@@ -55,21 +58,18 @@ def _try_download(url: str, raw: Path, cookies_arg: list) -> subprocess.Complete
             "--extractor-args", f"youtube:player_client={client}",
             "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         ]
-
         if fmt:
             cmd += ["-f", fmt]
-
         cmd += cookies_arg
 
         result = subprocess.run(cmd, capture_output=True, text=True)
-
         if result.returncode == 0:
-            log.info(f"  ✓ Download succeeded with {label}")
-            return result
+            log.info(f"  ✓ Succeeded with {label}")
+            return True
 
         log.warning(f"  {label} failed: {result.stderr[:100].strip()}")
 
-    return result  # return last failed result
+    return False
 
 
 def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
@@ -77,27 +77,25 @@ def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
     raw  = temp / f"{video_id}_raw.%(ext)s"
     out  = temp / f"{video_id}_slowed_reverb.mp3"
 
-    # Check cookies
+    # Cookies
     if COOKIES_PATH.exists() and COOKIES_PATH.stat().st_size > 500:
         log.info(f"  Cookies loaded: {COOKIES_PATH.stat().st_size} bytes")
         cookies_arg = ["--cookies", str(COOKIES_PATH)]
     else:
-        log.warning("  Cookies missing — trying without")
+        log.warning("  No valid cookies found")
         cookies_arg = []
 
-    # Download
     log.info(f"  Downloading audio for video_id={video_id}...")
-    result = _try_download(
-        f"https://www.youtube.com/watch?v={video_id}", raw, cookies_arg
-    )
+    url = f"https://www.youtube.com/watch?v={video_id}"
 
-    if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp failed on all attempts: {result.stderr}")
+    success = _try_download(url, raw, cookies_arg)
+    if not success:
+        raise DownloadError(f"All download attempts failed for {video_id}")
 
     # Find downloaded file
     downloaded = list(temp.glob(f"{video_id}_raw.*"))
     if not downloaded:
-        raise FileNotFoundError(f"Downloaded file not found in {temp}")
+        raise DownloadError(f"Downloaded file not found in {temp} after successful yt-dlp?")
 
     raw_file = downloaded[0]
 
@@ -127,20 +125,14 @@ def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
         right = librosa.effects.time_stretch(y[1], rate=SLOW_FACTOR)
         y_slow = np.stack([left, right])
 
-    log.info("  Applying reverb, EQ, and compression...")
-
+    log.info("  Applying reverb, EQ, compression...")
     board = Pedalboard([
         Compressor(threshold_db=-18, ratio=3.0, attack_ms=5.0, release_ms=100.0),
         LowShelfFilter(cutoff_frequency_hz=200, gain_db=3.0),
         HighShelfFilter(cutoff_frequency_hz=8000, gain_db=-2.5),
-        Reverb(
-            room_size=REVERB_ROOM,
-            damping=0.6,
-            wet_level=REVERB_WET,
-            dry_level=1.0 - REVERB_WET,
-            width=0.9,
-            freeze_mode=0.0,
-        ),
+        Reverb(room_size=REVERB_ROOM, damping=0.6,
+               wet_level=REVERB_WET, dry_level=1.0-REVERB_WET,
+               width=0.9, freeze_mode=0.0),
     ])
 
     y_effected = board(y_slow.astype(np.float32), sr)
@@ -155,7 +147,7 @@ def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
     seg.export(str(out), format="mp3", bitrate="320k",
                tags={"title": f"{title} (Slowed + Reverb)", "artist": artist})
 
-    log.info(f"  Processed audio: {out.name} ({out.stat().st_size / (1024*1024):.1f} MB)")
+    log.info(f"  ✓ Done: {out.name} ({out.stat().st_size/(1024*1024):.1f} MB)")
     return str(out)
 
 
