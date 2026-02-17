@@ -22,23 +22,16 @@ import librosa
 log = logging.getLogger("yt-uploader")
 
 SLOW_FACTOR  = 0.80   # 80% of original speed
-REVERB_ROOM  = 0.75   # Room size (0–1)
+REVERB_ROOM  = 0.75   # Room size (0-1)
 REVERB_WET   = 0.35   # Wet/dry mix
 TARGET_LUFS  = -14.0  # Loudness target (YouTube standard)
 
 
 def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
-    """
-    Downloads + processes audio.
-    Returns path to the processed .mp3 file.
-    """
-    temp  = Path(temp_dir)
-    raw   = temp / f"{video_id}_raw.%(ext)s"
-    raw_mp3 = temp / f"{video_id}_raw.mp3"
-    out   = temp / f"{video_id}_slowed_reverb.mp3"
+    temp    = Path(temp_dir)
+    raw     = temp / f"{video_id}_raw.%(ext)s"
+    out     = temp / f"{video_id}_slowed_reverb.mp3"
 
-    # ── Download ──────────────────────────────────────────────────────
-    log.info(f"  Downloading audio for video_id={video_id}...")
     # Write cookies to temp file if available
     cookies_file = None
     yt_cookies = os.environ.get("YT_COOKIES", "")
@@ -46,39 +39,58 @@ def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
         cookies_file = temp / "cookies.txt"
         cookies_file.write_text(yt_cookies)
 
+    # Download
+    log.info(f"  Downloading audio for video_id={video_id}...")
     cmd = [
         "yt-dlp",
         f"https://www.youtube.com/watch?v={video_id}",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", "0",
+        "-f", "bestaudio/best",
         "-o", str(raw),
         "--no-playlist",
         "--quiet",
         "--no-warnings",
         "--geo-bypass",
-        "--extractor-args", "youtube:player_client=web",
+        "--extractor-args", "youtube:player_client=web,ios",
         "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     ]
     if cookies_file and cookies_file.exists():
         cmd += ["--cookies", str(cookies_file)]
+
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp failed: {result.stderr}")
 
-    if not raw_mp3.exists():
-        raise FileNotFoundError(f"Downloaded file not found: {raw_mp3}")
+    # Find downloaded file (extension may vary before conversion)
+    downloaded = list(temp.glob(f"{video_id}_raw.*"))
+    if not downloaded:
+        raise FileNotFoundError(f"Downloaded file not found in {temp}")
 
-    log.info(f"  ✓ Downloaded: {raw_mp3.stat().st_size / 1024:.0f} KB")
+    raw_file = downloaded[0]
 
-    # ── Load with librosa for time-stretching ──────────────────────────
-    log.info("  Applying slowed effect (0.80×)...")
-    y, sr = librosa.load(str(raw_mp3), sr=44100, mono=False)
+    # Convert to mp3 if needed
+    if raw_file.suffix.lower() != ".mp3":
+        log.info(f"  Converting {raw_file.suffix} to mp3...")
+        converted = temp / f"{video_id}_raw.mp3"
+        subprocess.run([
+            "ffmpeg", "-i", str(raw_file),
+            "-vn", "-ar", "44100", "-ac", "2", "-b:a", "320k",
+            str(converted), "-y", "-loglevel", "quiet"
+        ], check=True)
+        raw_file.unlink()
+        raw_file = converted
 
-    # Handle mono vs stereo
+    log.info(f"  Downloaded: {raw_file.stat().st_size / 1024:.0f} KB")
+
+    # Load with librosa for time-stretching
+    log.info("  Applying slowed effect (0.80x)...")
+    y, sr = librosa.load(str(raw_file), sr=44100, mono=False)
+
     if y.ndim == 1:
         y_slow = librosa.effects.time_stretch(y, rate=SLOW_FACTOR)
-        y_slow = np.stack([y_slow, y_slow])  # make stereo
+        y_slow = np.stack([y_slow, y_slow])
     else:
         left  = librosa.effects.time_stretch(y[0], rate=SLOW_FACTOR)
         right = librosa.effects.time_stretch(y[1], rate=SLOW_FACTOR)
@@ -86,11 +98,10 @@ def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
 
     log.info("  Applying reverb, EQ, and compression...")
 
-    # ── Pedalboard effects chain ──────────────────────────────────────
     board = Pedalboard([
         Compressor(threshold_db=-18, ratio=3.0, attack_ms=5.0, release_ms=100.0),
-        LowShelfFilter(cutoff_frequency_hz=200, gain_db=3.0),   # warm bass boost
-        HighShelfFilter(cutoff_frequency_hz=8000, gain_db=-2.5), # soften highs (lofi)
+        LowShelfFilter(cutoff_frequency_hz=200, gain_db=3.0),
+        HighShelfFilter(cutoff_frequency_hz=8000, gain_db=-2.5),
         Reverb(
             room_size=REVERB_ROOM,
             damping=0.6,
@@ -101,17 +112,12 @@ def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
         ),
     ])
 
-    # Pedalboard expects float32 shape (channels, samples)
     y_effected = board(y_slow.astype(np.float32), sr)
-
-    # ── Normalize to TARGET_LUFS ──────────────────────────────────────
     y_effected = _normalize_loudness(y_effected, sr)
 
-    # ── Save to wav first, then convert to MP3 ────────────────────────
     wav_path = temp / f"{video_id}_processed.wav"
     sf.write(str(wav_path), y_effected.T, sr, subtype="PCM_24")
 
-    # ── Fade in/out with pydub ─────────────────────────────────────────
     log.info("  Adding fade-in/out...")
     seg = AudioSegment.from_wav(str(wav_path))
     seg = seg.fade_in(3000).fade_out(4000)
@@ -122,25 +128,19 @@ def process_audio(video_id: str, title: str, artist: str, temp_dir: str) -> str:
                    "artist": artist,
                })
 
-    log.info(f"  ✓ Processed audio saved: {out.name} ({out.stat().st_size / (1024*1024):.1f} MB)")
+    log.info(f"  Processed audio saved: {out.name} ({out.stat().st_size / (1024*1024):.1f} MB)")
     return str(out)
 
 
 def _normalize_loudness(audio: np.ndarray, sr: int) -> np.ndarray:
-    """
-    Simple peak normalization targeting ~-1 dBFS headroom.
-    (Full LUFS measurement requires pyloudnorm which is optional.)
-    """
     try:
         import pyloudnorm as pyln
         meter = pyln.Meter(sr)
         loudness = meter.integrated_loudness(audio.T)
-        if loudness > -70:  # avoid infinite gain on silence
+        if loudness > -70:
             audio = pyln.normalize.loudness(audio.T, loudness, TARGET_LUFS).T
     except ImportError:
-        # Fallback: peak normalize
         peak = np.max(np.abs(audio))
         if peak > 0:
             audio = audio / peak * 0.9
-
     return audio
