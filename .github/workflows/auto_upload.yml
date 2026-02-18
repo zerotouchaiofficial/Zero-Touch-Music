@@ -80,13 +80,13 @@ jobs:
           cd src
           python main.py
 
-      - name: 💾 Commit uploaded songs log
+      - name: 💾 Commit upload logs
         if: always()
         run: |
           git config user.name  "yt-bot"
           git config user.email "yt-bot@github.com"
-          git add output/uploaded.json output/last_language.json || true
-          git diff --staged --quiet || git commit -m "📝 Update logs [skip ci]"
+          git add output/uploaded.json output/upload_history.txt output/last_language.json output/playlists.json || true
+          git diff --staged --quiet || git commit -m "📝 Update upload logs [skip ci]"
           git push || true
 
       - name: 📎 Upload artifacts
