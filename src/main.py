@@ -1,5 +1,5 @@
 """
-main.py - Pipeline orchestrator with language tracking and Discord notifications.
+main.py - Pipeline orchestrator with duplicate prevention.
 """
 
 import os
@@ -33,10 +33,9 @@ def run_pipeline():
     log.info(f"🎵 YT Auto-Uploader started at {datetime.utcnow().isoformat()}")
     log.info("=" * 60)
 
-    # Get current language for this run
     language = get_current_language()
 
-    # ── Step 1: Get candidate songs ──────────────────────────────────
+    # ── Step 1: Get candidate songs (skips duplicates automatically) ──
     log.info("📡 Step 1: Fetching trending songs...")
     candidates = get_trending_songs(max_candidates=10)
     if not candidates:
@@ -44,7 +43,7 @@ def run_pipeline():
         send_discord_notification(
             title="⚠️ No Songs Found",
             description=f"No {language} trending songs available.",
-            color=16776960  # yellow
+            color=16776960
         )
         sys.exit(1)
 
@@ -82,7 +81,7 @@ def run_pipeline():
         send_discord_notification(
             title="❌ All Downloads Failed",
             description=f"Tried {len(candidates)} {language} songs, all failed.",
-            color=15158332  # red
+            color=15158332
         )
         sys.exit(1)
 
@@ -131,14 +130,21 @@ def run_pipeline():
         )
         log.info(f"✅ Uploaded! → {video_url}")
 
-        # Mark as uploaded
-        mark_uploaded(song["video_id"])
+        # ── Mark as uploaded (prevents duplicates forever) ────────────
+        log.info("\n📝 Marking song as uploaded...")
+        mark_uploaded(
+            video_id=song["video_id"],
+            title=song["title"],
+            artist=song["artist"],
+            language=language,
+            youtube_url=video_url,
+        )
 
         # ── Success notification ──────────────────────────────────────
         send_discord_notification(
             title=f"✅ Upload Complete ({language.upper()})",
             description=f"**{song['title']}** by {song['artist']}\n[Watch on YouTube]({video_url})",
-            color=5763719  # green
+            color=5763719
         )
 
         # ── Step 7: Cleanup ───────────────────────────────────────────
@@ -153,7 +159,7 @@ def run_pipeline():
         send_discord_notification(
             title="❌ Pipeline Error",
             description=f"Failed during processing: {str(e)[:200]}",
-            color=15158332  # red
+            color=15158332
         )
         sys.exit(1)
 
