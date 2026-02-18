@@ -2,7 +2,6 @@ name: 🎵 Auto Upload Slowed+Reverb
 
 on:
   schedule:
-    # REDUCED TO 3x DAILY to stay under YouTube quota
     - cron: "0 6  * * *"   # 6 AM UTC
     - cron: "0 14 * * *"   # 2 PM UTC  
     - cron: "0 22 * * *"   # 10 PM UTC
@@ -22,12 +21,17 @@ jobs:
     name: 🚀 Upload
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    
+    # CRITICAL: Give GITHUB_TOKEN write permission
+    permissions:
+      contents: write
 
     steps:
       - name: 📦 Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ secrets.GITHUB_TOKEN }}  # Use built-in token
+          fetch-depth: 0
 
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
@@ -48,11 +52,8 @@ jobs:
       - name: 📁 Init output dir
         run: |
           mkdir -p output temp
-          
-          # Fix uploaded.json if corrupted
           if [ -f "output/uploaded.json" ]; then
             if ! jq empty output/uploaded.json 2>/dev/null; then
-              echo "⚠️ uploaded.json corrupted, resetting..."
               echo "[]" > output/uploaded.json
             fi
           else
@@ -72,15 +73,26 @@ jobs:
           cd src
           python main.py
 
-      - name: 💾 Commit
+      - name: 💾 Commit and push
         if: always()
         run: |
-          git config user.name "yt-bot"
-          git config user.email "bot@example.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
           git add output/*.json output/*.txt 2>/dev/null || true
-          if ! git diff --staged --quiet; then
-            git commit -m "Update logs [skip ci]"
-            git push
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "📝 Update upload logs [skip ci]"
+            
+            # Push with error handling
+            if git push; then
+              echo "✅ Changes pushed successfully"
+            else
+              echo "❌ Push failed - check repository permissions"
+              exit 1
+            fi
           fi
 
       - name: 📎 Artifacts
