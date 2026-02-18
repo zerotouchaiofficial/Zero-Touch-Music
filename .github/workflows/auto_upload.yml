@@ -75,6 +75,7 @@ jobs:
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           CHANNEL_NAME:     ${{ secrets.CHANNEL_NAME }}
           VIDEO_PRIVACY:    ${{ github.event.inputs.privacy || 'public' }}
+          DISCORD_WEBHOOK:  ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           cd src
           python main.py
@@ -84,8 +85,8 @@ jobs:
         run: |
           git config user.name  "yt-bot"
           git config user.email "yt-bot@github.com"
-          git add output/uploaded.json || true
-          git diff --staged --quiet || git commit -m "📝 Update uploaded songs log [skip ci]"
+          git add output/uploaded.json output/last_language.json || true
+          git diff --staged --quiet || git commit -m "📝 Update logs [skip ci]"
           git push || true
 
       - name: 📎 Upload artifacts
@@ -97,3 +98,17 @@ jobs:
             output/*.mp4
             output/*.jpg
           retention-days: 3
+
+      - name: 🚨 Notify on failure
+        if: failure()
+        run: |
+          curl -X POST "${{ secrets.DISCORD_WEBHOOK }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "embeds": [{
+                "title": "❌ YouTube Upload Failed",
+                "description": "Check the [Actions log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.",
+                "color": 15158332,
+                "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'"
+              }]
+            }' || echo "Discord notification failed (webhook not set?)"
