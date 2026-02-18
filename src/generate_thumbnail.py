@@ -1,6 +1,6 @@
 """
 generate_thumbnail.py
-Creates a stunning YouTube thumbnail (1280x720).
+Creates YouTube thumbnail with smart text wrapping.
 """
 
 import math
@@ -31,7 +31,7 @@ def generate_thumbnail(song_title: str, artist: str,
     img  = Image.new("RGB", (THUMB_W, THUMB_H))
     draw = ImageDraw.Draw(img)
 
-    # Gradient background
+    # Gradient
     for y in range(THUMB_H):
         for x in range(THUMB_W):
             t = x / THUMB_W * 0.5 + y / THUMB_H * 0.5
@@ -58,20 +58,20 @@ def generate_thumbnail(song_title: str, artist: str,
     # Waveform
     _draw_waveform(draw, accent)
 
-    # Dark right panel for text
+    # Dark right panel
     overlay = Image.new("RGBA", (THUMB_W, THUMB_H), (0, 0, 0, 0))
     od      = ImageDraw.Draw(overlay)
     od.rectangle([THUMB_W // 2, 0, THUMB_W, THUMB_H], fill=(0, 0, 0, 160))
     img  = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
 
-    # Vignette (fixed)
+    # Vignette
     img  = _vignette(img)
     draw = ImageDraw.Draw(img)
 
     # Fonts
     try:
-        font_title   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 90)
-        font_artist  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 52)
+        font_title   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
+        font_artist  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 48)
         font_badge   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
         font_channel = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
     except Exception:
@@ -91,7 +91,7 @@ def generate_thumbnail(song_title: str, artist: str,
 
     # Badge
     badge   = "◆  SLOWED + REVERB  ◆"
-    badge_y = 90
+    badge_y = 70
     try:
         bbox    = draw.textbbox((0, 0), badge, font=font_badge)
         bw, bh  = bbox[2] - bbox[0] + 40, bbox[3] - bbox[1] + 20
@@ -102,18 +102,25 @@ def generate_thumbnail(song_title: str, artist: str,
                             radius=15, fill=tuple(min(255, c + 30) for c in accent))
     centered(badge, font_badge, badge_y + 8, color=(0, 0, 0))
 
-    # Song title
-    title_display = song_title if len(song_title) <= 18 else song_title[:16] + "…"
-    centered(title_display, font_title, 200)
+    # Song title - wrap if needed
+    title_lines = _wrap_text(song_title, font_title, 500, draw)
+    y = 170
+    for line in title_lines:
+        centered(line, font_title, y)
+        y += 80
 
     # Artist
-    centered(f"— {artist} —", font_artist, 320, color=(200, 220, 255))
+    y += 20
+    artist_display = artist if len(artist) <= 25 else artist[:23] + "…"
+    centered(f"— {artist_display} —", font_artist, y, color=(200, 220, 255))
 
     # Divider
-    draw.line([text_cx - 250, 410, text_cx + 250, 410], fill=(255, 255, 255, 100), width=2)
+    y += 70
+    draw.line([text_cx - 250, y, text_cx + 250, y], fill=(255, 255, 255, 100), width=2)
 
-    # Channel name
-    centered(f"♫  {channel_name}", font_channel, 430, color=(180, 180, 255))
+    # Channel
+    y += 15
+    centered(f"♫  {channel_name}", font_channel, y, color=(180, 180, 255))
 
     # Border
     draw.rectangle([0, 0, THUMB_W - 1, THUMB_H - 1], outline=accent, width=6)
@@ -122,6 +129,47 @@ def generate_thumbnail(song_title: str, artist: str,
     img.save(str(out_path), "JPEG", quality=95, optimize=True)
     log.info(f"  ✓ Thumbnail: {out_path.name}")
     return str(out_path)
+
+
+def _wrap_text(text: str, font, max_width: int, draw) -> list:
+    """Wrap text into multiple lines if needed."""
+    try:
+        bbox   = draw.textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+    except Exception:
+        text_w = len(text) * 35
+
+    if text_w <= max_width:
+        return [text]
+
+    words = text.split()
+    lines = []
+    current = []
+
+    for word in words:
+        test = " ".join(current + [word])
+        try:
+            bbox   = draw.textbbox((0, 0), test, font=font)
+            test_w = bbox[2] - bbox[0]
+        except Exception:
+            test_w = len(test) * 35
+
+        if test_w <= max_width:
+            current.append(word)
+        else:
+            if current:
+                lines.append(" ".join(current))
+            current = [word]
+
+    if current:
+        lines.append(" ".join(current))
+
+    # Max 2 lines
+    if len(lines) > 2:
+        lines = lines[:2]
+        lines[1] = lines[1][:25] + "…"
+
+    return lines
 
 
 def _draw_waveform(draw, accent):
@@ -139,7 +187,6 @@ def _draw_waveform(draw, accent):
 
 
 def _vignette(img: Image.Image) -> Image.Image:
-    """Fixed vignette — clamps margin so rectangles never invert."""
     vignette = Image.new("L", (THUMB_W, THUMB_H), 0)
     v        = ImageDraw.Draw(vignette)
     steps    = 40
