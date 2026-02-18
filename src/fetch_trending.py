@@ -1,7 +1,6 @@
 """
 fetch_trending.py
-Tracks all uploaded songs to prevent duplicates.
-Maintains both JSON (for code) and readable history (for humans).
+Simple duplicate prevention with both JSON and readable history.
 """
 
 import os
@@ -25,29 +24,21 @@ SEARCH_QUERIES_BY_LANGUAGE = {
         "trending english songs 2025",
         "top english hits 2025",
         "viral english songs 2025",
-        "best english music 2025",
-        "popular english songs 2025",
     ],
     "hindi": [
         "trending hindi songs 2025",
         "top bollywood songs 2025",
         "viral hindi music 2025",
-        "latest hindi hits 2025",
-        "popular hindi songs 2025",
     ],
     "punjabi": [
         "trending punjabi songs 2025",
         "top punjabi hits 2025",
         "viral punjabi music 2025",
-        "latest punjabi songs 2025",
-        "popular punjabi songs 2025",
     ],
     "haryanvi": [
         "trending haryanvi songs 2025",
         "top haryanvi hits 2025",
         "viral haryanvi music 2025",
-        "latest haryanvi songs 2025",
-        "popular haryanvi songs 2025",
     ],
 }
 
@@ -55,28 +46,24 @@ LANGUAGE_ROTATION = ["english", "hindi", "punjabi", "haryanvi"]
 
 
 def _load_uploaded() -> set:
-    """Load set of already uploaded video IDs."""
     if UPLOADED_LOG.exists():
         try:
             with open(UPLOADED_LOG) as f:
                 data = json.load(f)
-                log.info(f"  📊 {len(data)} songs already uploaded (will skip duplicates)")
+                log.info(f"  📊 {len(data)} songs already uploaded")
                 return set(data)
         except Exception:
             pass
-    log.info("  📊 No upload history found - starting fresh")
     return set()
 
 
 def _save_uploaded(video_ids: set):
-    """Save uploaded video IDs to JSON."""
     UPLOADED_LOG.parent.mkdir(exist_ok=True)
     with open(UPLOADED_LOG, "w") as f:
         json.dump(sorted(list(video_ids)), f, indent=2)
 
 
 def _get_next_language() -> str:
-    """Rotate through languages."""
     if LANGUAGE_LOG.exists():
         try:
             with open(LANGUAGE_LOG) as f:
@@ -101,7 +88,6 @@ def _get_next_language() -> str:
 
 
 def get_current_language() -> str:
-    """Get current language without advancing rotation."""
     if LANGUAGE_LOG.exists():
         try:
             with open(LANGUAGE_LOG) as f:
@@ -113,14 +99,12 @@ def get_current_language() -> str:
 
 
 def get_trending_songs(max_candidates: int = 10) -> list:
-    """Returns list of trending songs, skipping already-uploaded ones."""
     api_key = os.environ["YOUTUBE_API_KEY"]
     youtube = build("youtube", "v3", developerKey=api_key)
     
     uploaded = _load_uploaded()
     skip = uploaded | BLOCKLIST
     candidates = []
-    skipped_count = 0
 
     language = _get_next_language()
     queries  = SEARCH_QUERIES_BY_LANGUAGE[language]
@@ -128,18 +112,11 @@ def get_trending_songs(max_candidates: int = 10) -> list:
 
     log.info(f"  Language: {language.upper()} | Query: '{query}'")
 
-    region_codes = {
-        "english":  "US",
-        "hindi":    "IN",
-        "punjabi":  "IN",
-        "haryanvi": "IN",
-    }
-    region = region_codes.get(language, "US")
+    region = "IN" if language in ["hindi", "punjabi", "haryanvi"] else "US"
 
-    # Try chart first
     try:
         resp = youtube.videos().list(
-            part="snippet,contentDetails,statistics",
+            part="snippet,contentDetails",
             chart="mostPopular",
             videoCategoryId="10",
             regionCode=region,
@@ -148,29 +125,23 @@ def get_trending_songs(max_candidates: int = 10) -> list:
 
         for item in resp.get("items", []):
             vid_id = item["id"]
-            
             if vid_id in skip:
-                skipped_count += 1
                 continue
-                
             secs = _parse_duration(item["contentDetails"].get("duration", "PT0S"))
             if not (60 <= secs <= 480):
                 continue
-                
             snippet = item["snippet"]
             candidates.append({
-                "video_id":   vid_id,
-                "title":      _clean_title(snippet.get("title", "Unknown")),
-                "artist":     _clean_artist(snippet.get("channelTitle", "Unknown")),
-                "duration":   secs,
+                "video_id": vid_id,
+                "title":    _clean_title(snippet.get("title", "Unknown")),
+                "artist":   _clean_artist(snippet.get("channelTitle", "Unknown")),
+                "duration": secs,
             })
             if len(candidates) >= max_candidates:
                 break
-
     except Exception as e:
-        log.warning(f"Chart lookup failed: {e}")
+        log.warning(f"Chart failed: {e}")
 
-    # Fill from search if needed
     if len(candidates) < max_candidates:
         try:
             resp = youtube.search().list(
@@ -186,60 +157,47 @@ def get_trending_songs(max_candidates: int = 10) -> list:
 
             for item in resp.get("items", []):
                 vid_id = item["id"]["videoId"]
-                
                 if vid_id in skip:
-                    skipped_count += 1
                     continue
-                    
                 snippet = item["snippet"]
                 candidates.append({
-                    "video_id":   vid_id,
-                    "title":      _clean_title(snippet.get("title", "Unknown")),
-                    "artist":     _clean_artist(snippet.get("channelTitle", "Unknown")),
-                    "duration":   180,
+                    "video_id": vid_id,
+                    "title":    _clean_title(snippet.get("title", "Unknown")),
+                    "artist":   _clean_artist(snippet.get("channelTitle", "Unknown")),
+                    "duration": 180,
                 })
                 if len(candidates) >= max_candidates:
                     break
-        except Exception as e:
-            log.warning(f"Search failed: {e}")
+        except Exception:
+            pass
 
-    if skipped_count > 0:
-        log.info(f"  ⏭️  Skipped {skipped_count} already-uploaded songs")
-        
-    log.info(f"  ✅ Found {len(candidates)} new {language} songs to try")
+    log.info(f"  ✅ Found {len(candidates)} {language} songs")
     return candidates
 
 
-def mark_uploaded(video_id: str, title: str, artist: str, language: str, youtube_url: str):
-    """
-    Mark song as uploaded and add to human-readable history.
-    This prevents the same song from ever being used again.
-    """
-    # Update JSON (for code)
+def mark_uploaded(video_id: str, title: str = "", artist: str = "", youtube_url: str = ""):
+    """Mark song as uploaded - prevents duplicates."""
+    # Update JSON
     uploaded = _load_uploaded()
     uploaded.add(video_id)
     _save_uploaded(uploaded)
     
-    # Update human-readable history (for you)
+    # Update history file
     HISTORY_LOG.parent.mkdir(exist_ok=True)
+    language = get_current_language()
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     
-    history_entry = f"""
-{'='*80}
-Uploaded: {timestamp}
-Language: {language.upper()}
-Title:    {title}
-Artist:   {artist}
-Video ID: {video_id}
-URL:      {youtube_url}
-{'='*80}
-"""
-    
-    # Append to history file
     with open(HISTORY_LOG, "a", encoding="utf-8") as f:
-        f.write(history_entry)
+        f.write(f"\n{'='*70}\n")
+        f.write(f"Uploaded: {timestamp}\n")
+        f.write(f"Language: {language.upper()}\n")
+        f.write(f"Title:    {title}\n")
+        f.write(f"Artist:   {artist}\n")
+        f.write(f"Video ID: {video_id}\n")
+        f.write(f"URL:      {youtube_url}\n")
+        f.write(f"{'='*70}\n")
     
-    log.info(f"  📝 Marked as uploaded (total: {len(uploaded)} songs)")
+    log.info(f"  ✅ Saved to history (total uploads: {len(uploaded)})")
 
 
 def _parse_duration(iso: str) -> int:
