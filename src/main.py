@@ -1,5 +1,5 @@
 """
-main.py - BULLETPROOF version that ensures mark_uploaded is called
+main.py - Handles YouTube quota gracefully
 """
 
 import os
@@ -15,7 +15,7 @@ from fetch_trending import get_trending_songs, mark_uploaded, get_current_langua
 from process_audio import process_audio, DownloadError
 from create_video import create_video
 from generate_thumbnail import generate_thumbnail
-from upload_youtube import upload_to_youtube
+from upload_youtube import upload_to_youtube, QuotaExceededError
 from seo_generator import generate_seo_metadata
 from utils import cleanup_temp_files, setup_logging, send_discord_notification
 
@@ -113,28 +113,43 @@ def run_pipeline():
         )
         log.info(f"✅ Uploaded! → {video_url}")
 
+    except QuotaExceededError as e:
+        log.warning("⏸️  YouTube quota exceeded for today!")
+        log.warning("   Video files saved - will upload tomorrow")
+        send_discord_notification(
+            title="⏸️  Daily Quota Reached",
+            description=f"YouTube upload limit hit. Video saved for tomorrow.\n**{song['title']}** by {song['artist']}",
+            color=16776960  # yellow
+        )
+        # DON'T mark as uploaded - will retry tomorrow
+        log.info("\n🧹 Cleaning up...")
+        cleanup_temp_files(str(TEMP_DIR))
+        sys.exit(0)  # Exit gracefully, not an error
+        
     except Exception as e:
         log.error(f"❌ Upload failed: {e}")
         log.error(traceback.format_exc())
+        send_discord_notification(
+            title="❌ Upload Failed",
+            description=str(e)[:200],
+            color=15158332
+        )
         sys.exit(1)
     
-    # CRITICAL: Always mark as uploaded, even if notifications fail
+    # Only mark as uploaded if upload succeeded
     try:
-        log.info("\n📝 CRITICAL: Marking song as uploaded...")
+        log.info("\n📝 Marking song as uploaded...")
         mark_uploaded(
             video_id=song["video_id"],
             title=song["title"],
             artist=song["artist"],
-            youtube_url=video_url or "unknown",
+            youtube_url=video_url,
         )
-        log.info("✅ Song marked as uploaded successfully!")
+        log.info("✅ Song marked!")
         
     except Exception as e:
-        log.error(f"❌ CRITICAL ERROR marking as uploaded: {e}")
-        log.error(traceback.format_exc())
-        # Still try to notify even if marking failed
+        log.error(f"❌ Error marking: {e}")
     
-    # Notifications (non-critical, can fail)
     try:
         send_discord_notification(
             title=f"✅ Upload Complete ({language.upper()})",
