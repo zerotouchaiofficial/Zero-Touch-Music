@@ -1,6 +1,6 @@
 """
 upload_youtube.py
-Uploads video to YouTube and auto-organizes into language-specific playlists.
+Uploads with quota detection
 """
 
 import os
@@ -24,11 +24,8 @@ SCOPES = [
 
 CATEGORY_MUSIC = "10"
 PRIVACY_STATUS = os.environ.get("VIDEO_PRIVACY", "public")
-
-# Playlist cache file
 PLAYLIST_CACHE = Path("output/playlists.json")
 
-# Playlist titles by language
 PLAYLIST_TITLES = {
     "english":  "Slowed + Reverb | English Hits",
     "hindi":    "Slowed + Reverb | Hindi Songs",
@@ -37,8 +34,12 @@ PLAYLIST_TITLES = {
 }
 
 
+class QuotaExceededError(Exception):
+    """Raised when daily YouTube upload quota is exceeded."""
+    pass
+
+
 def _get_credentials() -> Credentials:
-    """Load OAuth credentials from environment variables."""
     client_id     = os.environ["YT_CLIENT_ID"]
     client_secret = os.environ["YT_CLIENT_SECRET"]
     refresh_token = os.environ["YT_REFRESH_TOKEN"]
@@ -57,7 +58,6 @@ def _get_credentials() -> Credentials:
 
 
 def _load_playlist_cache() -> dict:
-    """Load cached playlist IDs."""
     if PLAYLIST_CACHE.exists():
         try:
             with open(PLAYLIST_CACHE) as f:
@@ -68,56 +68,38 @@ def _load_playlist_cache() -> dict:
 
 
 def _save_playlist_cache(cache: dict):
-    """Save playlist IDs to cache."""
     PLAYLIST_CACHE.parent.mkdir(exist_ok=True)
     with open(PLAYLIST_CACHE, "w") as f:
         json.dump(cache, f)
 
 
 def _get_or_create_playlist(youtube, language: str) -> str:
-    """
-    Get existing playlist ID for language, or create if doesn't exist.
-    Returns playlist ID.
-    """
     cache = _load_playlist_cache()
 
     if language in cache:
-        # Verify playlist still exists
         try:
-            youtube.playlists().list(
-                part="snippet",
-                id=cache[language]
-            ).execute()
-            log.info(f"  Using existing {language} playlist: {cache[language]}")
+            youtube.playlists().list(part="snippet", id=cache[language]).execute()
+            log.info(f"  Using existing {language} playlist")
             return cache[language]
         except HttpError:
-            log.warning(f"  Cached playlist {cache[language]} not found, creating new...")
+            log.warning(f"  Cached playlist not found, creating new...")
 
-    # Create new playlist
     title = PLAYLIST_TITLES.get(language, f"Slowed + Reverb | {language.title()}")
-    description = f"All {language.title()} songs slowed to 80% with reverb. Perfect for studying, chilling, or late-night drives. New uploads daily!"
+    description = f"All {language.title()} songs slowed to 80% with reverb. New uploads daily!"
 
     try:
         response = youtube.playlists().insert(
             part="snippet,status",
             body={
-                "snippet": {
-                    "title": title,
-                    "description": description,
-                },
-                "status": {
-                    "privacyStatus": "public"
-                }
+                "snippet": {"title": title, "description": description},
+                "status": {"privacyStatus": "public"}
             }
         ).execute()
 
         playlist_id = response["id"]
-        log.info(f"  ✓ Created new {language} playlist: {playlist_id}")
-
-        # Cache it
+        log.info(f"  ✓ Created {language} playlist")
         cache[language] = playlist_id
         _save_playlist_cache(cache)
-
         return playlist_id
 
     except HttpError as e:
@@ -126,7 +108,6 @@ def _get_or_create_playlist(youtube, language: str) -> str:
 
 
 def _add_to_playlist(youtube, video_id: str, playlist_id: str):
-    """Add video to playlist."""
     if not playlist_id:
         return
 
@@ -136,14 +117,11 @@ def _add_to_playlist(youtube, video_id: str, playlist_id: str):
             body={
                 "snippet": {
                     "playlistId": playlist_id,
-                    "resourceId": {
-                        "kind": "youtube#video",
-                        "videoId": video_id
-                    }
+                    "resourceId": {"kind": "youtube#video", "videoId": video_id}
                 }
             }
         ).execute()
-        log.info(f"  ✓ Added to playlist: {playlist_id}")
+        log.info(f"  ✓ Added to playlist")
     except HttpError as e:
         log.warning(f"  Failed to add to playlist: {e}")
 
@@ -156,14 +134,9 @@ def upload_to_youtube(
     tags: list[str],
     language: str = "english",
 ) -> str:
-    """
-    Uploads video, sets thumbnail, and adds to language playlist.
-    Returns the public YouTube URL.
-    """
     creds   = _get_credentials()
     youtube = build("youtube", "v3", credentials=creds)
 
-    # ── Upload video ─────────────────────────────────────────────────
     log.info(f"  Uploading: {Path(video_path).name} ({Path(video_path).stat().st_size / (1024*1024):.1f} MB)")
 
     body = {
@@ -172,13 +145,10 @@ def upload_to_youtube(
             "description": description,
             "tags":        tags,
             "categoryId":  CATEGORY_MUSIC,
-            "defaultLanguage": "en",
-            "defaultAudioLanguage": "en",
         },
         "status": {
             "privacyStatus":           PRIVACY_STATUS,
             "selfDeclaredMadeForKids": False,
-            "madeForKids":             False,
         },
     }
 
@@ -198,8 +168,7 @@ def upload_to_youtube(
     video_id = _resumable_upload(request)
     log.info(f"  ✓ Video uploaded! ID: {video_id}")
 
-    # ── Set thumbnail ────────────────────────────────────────────────
-    log.info("  Setting custom thumbnail...")
+    # Set thumbnail
     try:
         youtube.thumbnails().set(
             videoId=video_id,
@@ -207,9 +176,9 @@ def upload_to_youtube(
         ).execute()
         log.info("  ✓ Thumbnail set!")
     except HttpError as e:
-        log.warning(f"  ⚠️  Thumbnail upload failed: {e}")
+        log.warning(f"  Thumbnail upload failed: {e}")
 
-    # ── Add to playlist ──────────────────────────────────────────────
+    # Add to playlist
     log.info(f"  Adding to {language} playlist...")
     playlist_id = _get_or_create_playlist(youtube, language)
     _add_to_playlist(youtube, video_id, playlist_id)
@@ -218,7 +187,6 @@ def upload_to_youtube(
 
 
 def _resumable_upload(request) -> str:
-    """Execute resumable upload with retry."""
     response   = None
     error      = None
     retry      = 0
@@ -231,11 +199,19 @@ def _resumable_upload(request) -> str:
             if status:
                 pct = int(status.progress() * 100)
                 log.info(f"  ↑ Upload progress: {pct}%")
+                
         except HttpError as e:
+            # Check for quota exceeded
+            if e.resp.status == 400:
+                error_content = str(e.content)
+                if "uploadLimitExceeded" in error_content or "quotaExceeded" in error_content:
+                    raise QuotaExceededError("Daily YouTube upload quota exceeded")
+            
             if e.resp.status in retry_codes:
                 error = f"HTTP {e.resp.status}: {e.content}"
             else:
                 raise
+                
         except Exception as e:
             error = str(e)
 
@@ -244,7 +220,7 @@ def _resumable_upload(request) -> str:
             if retry > max_retry:
                 raise RuntimeError(f"Upload failed after {max_retry} retries: {error}")
             wait = 2 ** retry
-            log.warning(f"  ⚠️  Upload error ({error}). Retrying in {wait}s...")
+            log.warning(f"  ⚠️  Upload error. Retrying in {wait}s...")
             time.sleep(wait)
             error = None
 
