@@ -69,6 +69,18 @@ BASE_TAGS = [
     "slowed music",
     "dreamy music",
     "late night music",
+    "#ZeroTouchMusic",
+    "#slowedandreverb",
+    "#slowedreverb",
+    "#slowed",
+    "#reverb",
+    "#slowedmusic",
+    "#reverbmusic",
+    "#aestheticvibes",
+    "#chillmusic",
+    "#nightvibes",
+    "#headphonesrecommended",
+
 ]
 
 HASHTAG_POOL = [
