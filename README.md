@@ -1,4 +1,4 @@
-# 🎵 YT Auto-Uploader — Slowed + Reverb
+# 🎵 Zero Touch Music — Slowed + Reverb
 
 > Fully automated YouTube channel that fetches trending songs, applies
 > professional Slowed + Reverb audio effects, generates cinematic videos
