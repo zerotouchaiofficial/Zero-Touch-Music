@@ -1,4 +1,4 @@
-name: 🎵 Auto Upload (5x Daily: 4 Songs + 1 Mashup)
+name: " Auto Upload (5x Daily: 4 Songs + 1 Mashup)"
 
 on:
   schedule:
