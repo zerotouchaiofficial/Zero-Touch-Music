@@ -1,6 +1,6 @@
 """
 upload_youtube.py
-Uploads with quota detection and exposes YouTube service
+Fixed version with correct OAuth scopes
 """
 
 import os
@@ -17,10 +17,10 @@ from googleapiclient.errors import HttpError
 
 log = logging.getLogger("yt-uploader")
 
+# FIXED: Only use the scopes that the token was created with
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube",
-    "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
 
 CATEGORY_MUSIC = "10"
